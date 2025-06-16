@@ -219,39 +219,97 @@ function createStatsOverview() {
     statsGrid.innerHTML = '';
     
     const stats = reportData.requests_statistics || [];
+    const failures = reportData.failures_statistics || [];
     
+    // Core metrics
     let totalRequests = 0;
     let totalFailures = 0;
     let avgResponseTime = 0;
-    let maxRps = 0;
+    let totalRps = 0; // Sum of all RPS (more meaningful than max)
+    let totalContentLength = 0;
+    let minResponseTime = Infinity;
+    let maxResponseTime = 0;
+    let p95ResponseTime = 0;
+    let activeEndpoints = 0;
     
     stats.forEach(stat => {
         if (stat.name !== 'Aggregated') {
             totalRequests += stat.num_requests || 0;
             totalFailures += stat.num_failures || 0;
             avgResponseTime += (stat.avg_response_time || 0) * (stat.num_requests || 0);
-            maxRps = Math.max(maxRps, stat.current_rps || 0);
+            totalRps += stat.current_rps || 0;
+            totalContentLength += (stat.avg_content_length || 0) * (stat.num_requests || 0);
+            minResponseTime = Math.min(minResponseTime, stat.min_response_time || Infinity);
+            maxResponseTime = Math.max(maxResponseTime, stat.max_response_time || 0);
+            activeEndpoints++;
         }
     });
     
+    // Calculate averages and derived metrics
     if (totalRequests > 0) {
         avgResponseTime = avgResponseTime / totalRequests;
+        totalContentLength = totalContentLength / totalRequests;
     }
     
-    const failureRate = totalRequests > 0 ? (totalFailures / totalRequests * 100) : 0;
+    if (minResponseTime === Infinity) minResponseTime = 0;
+    
+    // Get 95th percentile from response time statistics
+    const responseTimeStats = reportData.response_time_statistics || [];
+    if (responseTimeStats.length > 0) {
+        p95ResponseTime = responseTimeStats.reduce((sum, stat) => sum + (stat['0.95'] || 0), 0) / responseTimeStats.length;
+    }
+    
+    // Calculate success rate
+    const successRate = totalRequests > 0 ? ((totalRequests - totalFailures) / totalRequests * 100) : 0;
+    
+    // Module analysis
+    const moduleStats = analyzeModules(stats);
+    
+    // Error analysis
+    const uniqueErrorTypes = new Set(failures.map(f => f.error)).size;
+    
+    // Test duration analysis
+    const duration = reportData.duration || 'N/A';
+    let testDurationMinutes = 0;
+    if (duration !== 'N/A') {
+        const match = duration.match(/(\d+)\s*minute/i);
+        if (match) testDurationMinutes = parseInt(match[1]);
+    }
+    
+    // Data throughput
+    const totalDataMB = (totalContentLength * totalRequests) / (1024 * 1024);
+    const dataThroughputMBps = testDurationMinutes > 0 ? totalDataMB / (testDurationMinutes * 60) : 0;
+    
+    // Requests per minute
+    const requestsPerMinute = testDurationMinutes > 0 ? totalRequests / testDurationMinutes : 0;
+    
+    // Performance score (custom metric)
+    const performanceScore = calculatePerformanceScore(successRate, avgResponseTime, p95ResponseTime);
     
     const statCards = [
-        { label: 'Total Requests', value: totalRequests.toLocaleString(), icon: '📊' },
-        { label: 'Total Failures', value: totalFailures.toLocaleString(), icon: '❌' },
-        { label: 'Failure Rate', value: `${failureRate.toFixed(2)}%`, icon: '📉' },
-        { label: 'Avg Response Time', value: `${avgResponseTime.toFixed(0)}ms`, icon: '⏱️' },
-        { label: 'Test Duration', value: reportData.duration || 'N/A', icon: '⏰' },
-        { label: 'Max RPS', value: maxRps.toFixed(2), icon: '🚀' }
+        { label: 'Total Requests', value: totalRequests.toLocaleString(), icon: '📊', trend: 'neutral' },
+        { label: 'Success Rate', value: `${successRate.toFixed(1)}%`, icon: successRate >= 99 ? '🎯' : successRate >= 95 ? '✅' : '⚠️', trend: successRate >= 95 ? 'good' : 'bad' },
+        { label: 'Total RPS', value: totalRps.toFixed(1), icon: '🚀', trend: 'neutral' },
+        { label: 'Avg Response Time', value: `${avgResponseTime.toFixed(0)}ms`, icon: avgResponseTime < 200 ? '⚡' : avgResponseTime < 500 ? '⏱️' : '🐌', trend: avgResponseTime < 200 ? 'good' : avgResponseTime < 500 ? 'neutral' : 'bad' },
+        { label: '95th Percentile', value: `${p95ResponseTime.toFixed(0)}ms`, icon: '📈', trend: p95ResponseTime < 500 ? 'good' : p95ResponseTime < 1000 ? 'neutral' : 'bad' },
+        { label: 'Peak Response Time', value: `${maxResponseTime.toFixed(0)}ms`, icon: '⛰️', trend: maxResponseTime < 1000 ? 'good' : maxResponseTime < 2000 ? 'neutral' : 'bad' },
+        { label: 'Test Duration', value: duration, icon: '⏰', trend: 'neutral' },
+        { label: 'Requests/Minute', value: requestsPerMinute > 0 ? requestsPerMinute.toFixed(0) : 'N/A', icon: '⏰', trend: 'neutral' },
+        { label: 'Active Modules', value: moduleStats.moduleCount.toString(), icon: '🔧', trend: 'neutral' },
+        { label: 'Active Endpoints', value: activeEndpoints.toString(), icon: '🎯', trend: 'neutral' },
+        { label: 'Total Failures', value: totalFailures.toLocaleString(), icon: totalFailures === 0 ? '🎉' : '❌', trend: totalFailures === 0 ? 'good' : 'bad' },
+        { label: 'Error Types', value: uniqueErrorTypes.toString(), icon: uniqueErrorTypes === 0 ? '🎉' : uniqueErrorTypes <= 3 ? '⚠️' : '🚨', trend: uniqueErrorTypes === 0 ? 'good' : uniqueErrorTypes <= 3 ? 'neutral' : 'bad' },
+        { label: 'Avg Content Size', value: `${(totalContentLength / 1024).toFixed(1)}KB`, icon: '📦', trend: 'neutral' },
+        { label: 'Data Throughput', value: dataThroughputMBps > 0 ? `${dataThroughputMBps.toFixed(2)}MB/s` : 'N/A', icon: '📊', trend: 'neutral' },
+        { label: 'Best Module', value: moduleStats.bestModule || 'N/A', icon: '🏆', trend: 'good' },
+        { label: 'Worst Module', value: moduleStats.worstModule || 'N/A', icon: '🔴', trend: 'bad' },
+        { label: 'Performance Score', value: `${performanceScore}/100`, icon: performanceScore >= 80 ? '🏆' : performanceScore >= 60 ? '🥈' : '🥉', trend: performanceScore >= 80 ? 'good' : performanceScore >= 60 ? 'neutral' : 'bad' },
+        { label: 'Response Range', value: `${minResponseTime.toFixed(0)}-${maxResponseTime.toFixed(0)}ms`, icon: '📏', trend: 'neutral' }
     ];
     
     statCards.forEach(stat => {
         const card = document.createElement('div');
-        card.className = 'stat-card';
+        card.className = `stat-card ${stat.trend}`;
         card.innerHTML = `
             <div style="font-size: 2em; margin-bottom: 10px;">${stat.icon}</div>
             <div class="stat-value">${stat.value}</div>
@@ -259,6 +317,91 @@ function createStatsOverview() {
         `;
         statsGrid.appendChild(card);
     });
+}
+
+// Analyze modules for best/worst performance
+function analyzeModules(stats) {
+    const modulePerformance = {};
+    
+    stats.filter(s => s.name !== 'Aggregated').forEach(stat => {
+        const moduleName = extractModuleName(stat.name);
+        
+        if (!modulePerformance[moduleName]) {
+            modulePerformance[moduleName] = {
+                totalRequests: 0,
+                totalFailures: 0,
+                avgResponseTime: 0,
+                requestCount: 0
+            };
+        }
+        
+        const module = modulePerformance[moduleName];
+        module.totalRequests += stat.num_requests || 0;
+        module.totalFailures += stat.num_failures || 0;
+        module.avgResponseTime += (stat.avg_response_time || 0) * (stat.num_requests || 0);
+        module.requestCount++;
+    });
+    
+    let bestModule = null;
+    let worstModule = null;
+    let bestScore = -1;
+    let worstScore = 101;
+    
+    Object.keys(modulePerformance).forEach(module => {
+        const data = modulePerformance[module];
+        if (data.totalRequests > 0) {
+            data.avgResponseTime = data.avgResponseTime / data.totalRequests;
+            const failureRate = (data.totalFailures / data.totalRequests) * 100;
+            
+            // Calculate module score (0-100, higher is better)
+            const score = Math.max(0, 100 - failureRate * 2 - (data.avgResponseTime / 10));
+            
+            if (score > bestScore) {
+                bestScore = score;
+                bestModule = module;
+            }
+            if (score < worstScore) {
+                worstScore = score;
+                worstModule = module;
+            }
+        }
+    });
+    
+    return {
+        moduleCount: Object.keys(modulePerformance).length,
+        bestModule,
+        worstModule
+    };
+}
+
+// Calculate overall performance score
+function calculatePerformanceScore(successRate, avgResponseTime, p95ResponseTime) {
+    // Weighted scoring: Success Rate (40%), Avg Response Time (35%), P95 Response Time (25%)
+    let score = 0;
+    
+    // Success rate component (0-40 points)
+    score += (successRate / 100) * 40;
+    
+    // Average response time component (0-35 points)
+    // Good: <200ms = 35pts, OK: 200-500ms = 20-35pts, Poor: >500ms = 0-20pts
+    if (avgResponseTime < 200) {
+        score += 35;
+    } else if (avgResponseTime < 500) {
+        score += 35 - ((avgResponseTime - 200) / 300) * 15;
+    } else {
+        score += Math.max(0, 20 - ((avgResponseTime - 500) / 500) * 20);
+    }
+    
+    // P95 response time component (0-25 points)
+    if (p95ResponseTime < 500) {
+        score += 25;
+    } else if (p95ResponseTime < 1000) {
+        score += 25 - ((p95ResponseTime - 500) / 500) * 15;
+    } else {
+        score += Math.max(0, 10 - ((p95ResponseTime - 1000) / 1000) * 10);
+    }
+    
+    return Math.round(Math.max(0, Math.min(100, score)));
 }
 
 // Create requests overview chart
